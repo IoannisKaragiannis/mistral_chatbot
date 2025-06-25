@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Mistral Chat</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+</head>
+<body>
+  <div class="chat-container">
+    <header class="chat-header">
+      <button id="new-chat" class="chat-clear-btn">New Chat</button>
+      Mistral-7B-Instruct Chat
+      {% if rag_enabled %}<span class="rag-badge">RAG ON</span>{% endif %}
+    </header>
+    <main id="messages" class="chat-messages"></main>
+    <div class="chat-input-area">
+      <textarea id="prompt" class="chat-input" rows="2" placeholder="Type…"></textarea>
+      <button id="send" class="chat-send-btn">Send</button>
+    </div>
+  </div>
+  <script src="/static/chat.js"></script>
+</body>
+</html>

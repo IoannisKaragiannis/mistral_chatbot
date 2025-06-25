@@ -1,0 +1,16 @@
+openai
+transformers
+accelerate
+einops
+tiktoken
+protobuf
+sentencepiece
+bitsandbytes
+fastapi
+uvicorn[standard]
+jinja2
+faiss-gpu
+numpy<2.0
+datasets
+sentence-transformers
+wikipedia
