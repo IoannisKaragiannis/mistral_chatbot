@@ -1,4 +1,4 @@
-openai
+# Core model & performance libs
 transformers
 accelerate
 einops
@@ -6,11 +6,19 @@ tiktoken
 protobuf
 sentencepiece
 bitsandbytes
+langchain-huggingface
+
+
+# FastAPI server
 fastapi
 uvicorn[standard]
 jinja2
-faiss-gpu
-numpy<2.0
+
+# RAG / vector search
 datasets
 sentence-transformers
+faiss-gpu
+
+# Utilities
+numpy<2.0
 wikipedia
