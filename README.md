@@ -17,7 +17,11 @@ http://0.0.0.0:8000/
 
 # Example
 
-<img src="img/chat_example.png" alt="drawing" width="1000"/>
+In the two example below we observe how the model fails to preserve context already in the second question, namely *How did it end?*, while the solution with LangChain incorporated (in particular utilizing `ConversationBufferMemory` from `langchain.memory`) seems to succeed in preserving context by taking into consideration earlier prompts.
+
+| Without LangChain                                            | With LangChain                                               |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| <img src="img/chat_without_langchain.png" alt="drawing" width="450"/> | <img src="img/chat_with_langchain.png" alt="drawing" width="450"/> |
 
 # Docker Cheatsheet
 

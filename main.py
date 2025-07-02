@@ -1,38 +1,34 @@
-"""
-Author: Ioannis Karagiannis
-
-Launch server: uvicorn main:app --host 0.0.0.0 --port 8000
-"""
-
 import os
 import torch
-from fastapi import FastAPI, Request
+from uuid import uuid4
+from typing import Dict, List
+
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from fastapi import HTTPException
 from pydantic import BaseModel
-from typing import List
+
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, pipeline
 from huggingface_hub import snapshot_download
-from langchain_huggingface import HuggingFacePipeline
 
-# ─── CONFIG ─────────────────────────────────────────────────────────────────
+from langchain.llms import HuggingFacePipeline
+from langchain.prompts import PromptTemplate
+from langchain.memory import ConversationBufferMemory
+from langchain import LLMChain
 
-# Where to stash your downloaded models
+# ─── CONFIG ──────────────────────────────────────────────────────────────────
 MODELS_DIR = "models"
 os.makedirs(MODELS_DIR, exist_ok=True)
 
-# Mistral Instruct
 MISTRAL_REPO = "mistralai/Mistral-7B-Instruct-v0.1"
 LOCAL_MISTRAL = os.path.join(MODELS_DIR, "Mistral-7B-Instruct-v0.1")
-
-# link for the sharded model
-MISTRAL_SHARDER_REPO = "filipealmeida/Mistral-7B-Instruct-v0.1-sharded" 
+MISTRAL_SHARDER_REPO = "filipealmeida/Mistral-7B-Instruct-v0.1-sharded"
 LOCAL_MISTRAL_SHARDED = os.path.join(MODELS_DIR, "Mistral-7B-Instruct-v0.1-sharded")
-
 DEBUG = True
 
-# ─── DOWNLOAD IF MISSING ────────────────────────────────────────────────────
+# ─── DOWNLOAD IF MISSING ─────────────────────────────────────────────────────
 def ensure_snapshot(repo_id: str, local_path: str):
     if not os.path.isdir(local_path):
         print(f"⏳ Downloading {repo_id} → {local_path}")
@@ -45,19 +41,15 @@ def ensure_snapshot(repo_id: str, local_path: str):
     else:
         print(f"✅ {local_path} already exists, skipping download")
 
-# Mistral
 ensure_snapshot(MISTRAL_REPO, LOCAL_MISTRAL)
-
-# Mistral-sharder
 ensure_snapshot(MISTRAL_SHARDER_REPO, LOCAL_MISTRAL_SHARDED)
 
-# ─── LOAD MISTRAL MODEL ─────────────────────────────────────────────────────
-# Configuration for loading the model in 4-bit precision to save memory
+# ─── LOAD MODEL ─────────────────────────────────────────────────────────────
 bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,                    # Load model in 4-bit precision
-    bnb_4bit_use_double_quant=True,       # Use double quantization for better compression
-    bnb_4bit_quant_type="nf4",            # Specify quantization type as NF4 (a specific format for quantization)
-    bnb_4bit_compute_dtype=torch.bfloat16 # Use bfloat16 as the compute data type for operations
+    load_in_4bit=True,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16
 )
 print("✅ BitsAndBytesConfig ready.")
 
@@ -71,7 +63,6 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
     quantization_config=bnb_config,
 )
-
 model.eval()
 print("✅ Mistral ready.")
 
@@ -79,27 +70,29 @@ text_gen_pipeline = pipeline(
     model=model,
     tokenizer=tokenizer,
     task="text-generation",
-    temperature=0.85, 
-    eos_token_id=tokenizer.eos_token_id, 
-    pad_token_id=tokenizer.eos_token_id, 
-    repetition_penalty=1.1, 
-    return_full_text=False, # if set to True it will return the prompt as well
+    temperature=0.85,
+    eos_token_id=tokenizer.eos_token_id,
+    pad_token_id=tokenizer.eos_token_id,
+    repetition_penalty=1.1,
+    return_full_text=False,
     max_new_tokens=256,
     device_map="auto",
 )
-
-print("✅ Text-Generator Pipeline ready.")
+print("✅ Text-Generator ready.")
 
 mistral_llm = HuggingFacePipeline(pipeline=text_gen_pipeline)
+print("✅ HuggingFacePipeline ready.")
 
-print("✅ HuggingFacePipeline Mistral-LLM ready.")
+# ─── MEMORY STORE ───────────────────────────────────────────────────────────
+# session_id -> memory
+_memory_store: Dict[str, ConversationBufferMemory] = {}
 
 # ─── FASTAPI APP ────────────────────────────────────────────────────────────
-
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
+# ─── DATA MODELS ────────────────────────────────────────────────────────────
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -110,21 +103,62 @@ class ChatRequest(BaseModel):
     top_k: int = 50
     top_p: float = 0.9
 
-# Add this new endpoint for the root URL
+# ─── SET UP CHAIN & MEMORY ────────────────────────────────────────────────────
+chat_prompt = PromptTemplate(
+    input_variables=["history", "input"],
+    template="""
+You are a helpful assistant. Here is the conversation so far:
+{history}
+User: {input}
+Assistant:"""
+)
+base_chain = LLMChain(llm=mistral_llm, prompt=chat_prompt)
+
 @app.get("/", response_class=HTMLResponse)
-async def read_root(request: Request):
+async def read_root(request: Request, response: Response):
+    session_id = request.cookies.get("session_id")
+    if not session_id:
+        session_id = str(uuid4())
+        response.set_cookie(
+            key="session_id", value=session_id,
+            httponly=True, samesite="lax"
+        )
+    _memory_store.setdefault(
+        session_id,
+        ConversationBufferMemory(memory_key="history")
+    )
     return templates.TemplateResponse("index.html", {"request": request})
 
 @app.post("/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
+    session_id = request.cookies.get("session_id")
+    new_cookie = False
+    if not session_id:
+        session_id = str(uuid4())
+        new_cookie = True
+    memory = _memory_store.setdefault(
+        session_id,
+        ConversationBufferMemory(memory_key="history")
+    )
+    # bind memory
+    conversation = base_chain.copy()
+    conversation.memory = memory
+    # get user message
     user_msg = next(
-        (m.content for m in reversed(req.messages) if m.role == "user"), ""
+        (m.content for m in reversed(req.messages) if m.role == "user"),
+        ""
     )
     if DEBUG:
-        print("User message:", user_msg)
-
-    # Vanilla generation
-    mistral_response = mistral_llm.invoke(user_msg)
+        print(f"[{session_id}] User: {user_msg}")
+    # predict
+    assistant_reply = conversation.predict(input=user_msg)
     if DEBUG:
-        print("Answer:", mistral_response)
-    return JSONResponse({"role": "assistant", "content": mistral_response})
+        print(f"[{session_id}] Assistant: {assistant_reply}")
+    # send response
+    response = JSONResponse({"role": "assistant", "content": assistant_reply})
+    if new_cookie:
+        response.set_cookie(
+            key="session_id", value=session_id,
+            httponly=True, samesite="lax"
+        )
+    return response
