@@ -10,43 +10,22 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, pipeline
-from huggingface_hub import snapshot_download
 
 from langchain_huggingface import HuggingFacePipeline
 from langchain.prompts import PromptTemplate  # to manage reusable, parameterized prompts
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationChain
 
-# ─── CONFIG ──────────────────────────────────────────────────────────────────
-MODELS_DIR = "models"
-os.makedirs(MODELS_DIR, exist_ok=True)
 
 # This monolith is hard to split across GPUs
 MISTRAL_REPO = "mistralai/Mistral-7B-Instruct-v0.1"
-LOCAL_MISTRAL = os.path.join(MODELS_DIR, "Mistral-7B-Instruct-v0.1")
 # instead of having one huge bin file we will be using the sharded version
 # that it's easier to be allocated and fit on small GPUs
 # It also helps faster parallel loads of multiple shards
-MISTRAL_SHARDER_REPO = "filipealmeida/Mistral-7B-Instruct-v0.1-sharded"
-LOCAL_MISTRAL_SHARDED = os.path.join(MODELS_DIR, "Mistral-7B-Instruct-v0.1-sharded")
+MISTRAL_SHARDED_REPO = "filipealmeida/Mistral-7B-Instruct-v0.1-sharded"
+
 DEBUG = True
 LANGCHAIN_ENABLED = True
-
-# ─── DOWNLOAD IF MISSING ─────────────────────────────────────────────────────
-def ensure_snapshot(repo_id: str, local_path: str):
-    if not os.path.isdir(local_path):
-        print(f"⏳ Downloading {repo_id} → {local_path}")
-        snapshot_download(
-            repo_id=repo_id,
-            local_dir=local_path,
-            local_dir_use_symlinks=False,
-            use_auth_token=True
-        )
-    else:
-        print(f"✅ {local_path} already exists, skipping download")
-
-ensure_snapshot(MISTRAL_REPO, LOCAL_MISTRAL)
-ensure_snapshot(MISTRAL_SHARDER_REPO, LOCAL_MISTRAL_SHARDED)
 
 # ─── LOAD MODEL ─────────────────────────────────────────────────────────────
 bnb_config = BitsAndBytesConfig(
@@ -57,11 +36,11 @@ bnb_config = BitsAndBytesConfig(
 )
 print("✅ BitsAndBytesConfig ready.")
 
-tokenizer = AutoTokenizer.from_pretrained(LOCAL_MISTRAL, local_files_only=True)
+tokenizer = AutoTokenizer.from_pretrained(MISTRAL_REPO)
 print("✅ Tokenizer ready.")
 
 model = AutoModelForCausalLM.from_pretrained(
-    LOCAL_MISTRAL_SHARDED,
+    MISTRAL_SHARDED_REPO,
     local_files_only=True,
     torch_dtype=torch.bfloat16,
     device_map="auto",
