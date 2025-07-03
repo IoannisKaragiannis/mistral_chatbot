@@ -21,10 +21,10 @@ In the two example below we observe how the model fails to preserve context alre
 
 
 
-| Without LangChain                                            |
-| ------------------------------------------------------------ |
+|                      Without LangChain                       |
+| :----------------------------------------------------------: |
 | <img src="img/mistral_without_langchain.png" alt="drawing" width="750"/> |
-| **With LangChain**                                           |
+|                      **With LangChain**                      |
 | <img src="img/mistral_with_langchain.png" alt="drawing" width="750"/> |
 
 # Docker Cheatsheet
