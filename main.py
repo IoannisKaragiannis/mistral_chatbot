@@ -2,6 +2,7 @@ import os
 import torch
 from uuid import uuid4
 from typing import Dict, List
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -16,6 +17,11 @@ from langchain.prompts import PromptTemplate  # to manage reusable, parameterize
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationChain
 
+# RAG
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain.chains import ConversationalRetrievalChain
+from langchain.chains import RetrievalQA
 
 # This monolith is hard to split across GPUs
 MISTRAL_REPO = "mistralai/Mistral-7B-Instruct-v0.1"
@@ -26,6 +32,11 @@ MISTRAL_SHARDED_REPO = "filipealmeida/Mistral-7B-Instruct-v0.1-sharded"
 
 DEBUG = True
 LANGCHAIN_ENABLED = True
+
+USE_RAG = True  # enable retrieval-augmented generation
+DOCS_DIR = "docs" # folder with source documents for RAG
+
+os.makedirs(DOCS_DIR, exist_ok=True)
 
 # ─── LOAD MODEL ─────────────────────────────────────────────────────────────
 bnb_config = BitsAndBytesConfig(
@@ -65,6 +76,30 @@ print("✅ Text-Generator ready.")
 
 mistral_llm = HuggingFacePipeline(pipeline=text_gen_pipeline)
 print("✅ HuggingFacePipeline ready.")
+
+# ─── SET UP RAG ─────────────────────────────────────────────────────────────
+# ─── SET UP RAG (only if enabled and docs exist) ────────────────────────────
+vector_store = None
+if USE_RAG:
+    # try to load an existing FAISS index from disk
+    index_dir = Path(DOCS_DIR)
+    idx_file = index_dir / "index.faiss"
+    mapping_file = index_dir / "index.pkl"
+
+    if idx_file.exists() and mapping_file.exists():
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
+        vector_store = FAISS.load_local(
+            str(index_dir),
+            embeddings,
+            allow_dangerous_deserialization=True
+        )
+        print(f"✅ Loaded FAISS vector store from '{DOCS_DIR}' (deserialization allowed)")
+    else:
+        print(f"⚠️ No FAISS index found in '{DOCS_DIR}'; disabling RAG.")
+        USE_RAG = False
+
 
 # ─── MEMORY STORE ───────────────────────────────────────────────────────────
 # session_id -> memory
@@ -128,28 +163,62 @@ async def chat(req: ChatRequest, request: Request):
         new_cookie = True
 
     # extract last user message
-    user_msg = next(
-        (m.content for m in reversed(req.messages) if m.role == "user"),
-        ""
-    )
+    user_msg = next((m.content for m in reversed(req.messages) if m.role == "user"), "")
 
     if DEBUG:
         print(f"[{session_id}] User: {user_msg}")
 
+    assistant_reply = None
+
     # decide whether to use LangChain or raw pipeline
-    if LANGCHAIN_ENABLED:
+    if USE_RAG and LANGCHAIN_ENABLED and vector_store:
+        # use a memory keyed as "chat_history" so the chain can inject it automatically
+        rag_memory = _memory_store.setdefault(
+            f"{session_id}_rag",
+            ConversationBufferMemory(
+                memory_key="chat_history",   # <<— must match the chain’s expected key
+                return_messages=True
+            )
+        )
+
+        retriever = vector_store.as_retriever(
+            search_type="similarity",
+            search_kwargs={"k": 4},
+        )
+
+        conv_rag = ConversationalRetrievalChain.from_llm(
+            llm=mistral_llm,
+            retriever=retriever,
+            memory=rag_memory,
+            verbose=DEBUG,
+        )
+        # now we only need to pass the question
+        result = conv_rag({"question": user_msg})
+        assistant_reply = result["answer"]
+    elif USE_RAG and vector_store:
+
+        retriever = vector_store.as_retriever(
+            search_type="similarity",
+            search_kwargs={'k': 4}  
+        )
+
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=mistral_llm,
+            chain_type="stuff",
+            retriever=retriever,
+            verbose=DEBUG,
+        )
+        assistant_reply = qa_chain.run(user_msg)
+    elif LANGCHAIN_ENABLED:
         
         # get/create memory, run with LangChain
-        memory = _memory_store.setdefault(
-            session_id,
-            ConversationBufferMemory(memory_key="history")
-        )
+        memory = _memory_store.setdefault( session_id, ConversationBufferMemory(memory_key="history"))
         
         # build chain bound to this session's memory
-        conversation = get_conversation_chain(memory)
+        llm_chain = get_conversation_chain(memory)
 
         # predict (memory is updated internally)
-        assistant_reply = conversation.predict(input=user_msg)
+        assistant_reply = llm_chain.predict(input=user_msg)
     else:
         # raw pipeline: no history, just predict from the latest prompt
         outputs = text_gen_pipeline(user_msg)

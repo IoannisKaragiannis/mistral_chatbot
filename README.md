@@ -5,8 +5,23 @@
 source ~/python_venvs/mistral/bin/activate
 cd mistral_chat
 
-# (OPTIONAL) Get index and 
-(mistral) python3 build_index.py
+# (OPTIONAL) Only first time (you may need to sudo apt-install cetrain missing libraries as instructed)
+playwright install
+
+e.g.,
+sudo apt update
+sudo apt install -y \
+    libgstreamer-plugins-base1.0-0 \
+    gstreamer1.0-libav \
+    gstreamer1.0-plugins-bad \
+    libavif13
+
+# (OPTIONAL) Get faiss index 
+# with query
+(mistral) python3 build_vectordb.py --query "Fetch any information about Ioannis Karagiannis who graduated from KTH in 2015 and currently works for ISense-Group"
+
+# with explicit urls (press Enter to exit. Some bug in async AsyncChromiumLoader and playwright)
+(mistral) python3 build_vectordb.py --urls https://ioanniskaragiannis.github.io/index.html https://www.linkedin.com/in/ioannis-karagiannis-7129394a/
 
 # launch server with fastapi
 (mistral) uvicorn main:app --host 0.0.0.0 --port 8000
@@ -15,7 +30,7 @@ cd mistral_chat
 http://0.0.0.0:8000/
 ```
 
-# Example
+# Langchain impact
 
 In the two example below we observe how the model fails to preserve context already in the second question, namely *How did it end?*, while the solution with LangChain incorporated (in particular utilizing `ConversationBufferMemory` from `langchain.memory`) seems to succeed in preserving context by taking into consideration earlier prompts.
 
@@ -26,6 +41,17 @@ In the two example below we observe how the model fails to preserve context alre
 | <img src="img/mistral_without_langchain.png" alt="drawing" width="750"/> |
 |                      **With LangChain**                      |
 | <img src="img/mistral_with_langchain.png" alt="drawing" width="750"/> |
+
+
+
+# RAG impact
+
+
+|                         Without RAG                          |
+| :----------------------------------------------------------: |
+| <img src="img/mistral_without_rag.png" alt="drawing" width="750"/> |
+|                         **With RAG**                         |
+| <img src="img/mistral_with_rag.png" alt="drawing" width="750"/> |
 
 # Docker Cheatsheet
 
