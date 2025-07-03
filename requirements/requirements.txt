@@ -6,9 +6,11 @@ tiktoken
 protobuf
 sentencepiece
 bitsandbytes
+
+# LANGCHAIN
 langchain
 langchain-community
-
+langchain-huggingface
 
 # FastAPI server
 fastapi

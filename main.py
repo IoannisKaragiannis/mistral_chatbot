@@ -7,26 +7,30 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi import HTTPException
 from pydantic import BaseModel
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, pipeline
 from huggingface_hub import snapshot_download
 
-from langchain.llms import HuggingFacePipeline
-from langchain.prompts import PromptTemplate
+from langchain_huggingface import HuggingFacePipeline
+from langchain.prompts import PromptTemplate  # to manage reusable, parameterized prompts
 from langchain.memory import ConversationBufferMemory
-from langchain import LLMChain
+from langchain.chains import ConversationChain
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 MODELS_DIR = "models"
 os.makedirs(MODELS_DIR, exist_ok=True)
 
+# This monolith is hard to split across GPUs
 MISTRAL_REPO = "mistralai/Mistral-7B-Instruct-v0.1"
 LOCAL_MISTRAL = os.path.join(MODELS_DIR, "Mistral-7B-Instruct-v0.1")
+# instead of having one huge bin file we will be using the sharded version
+# that it's easier to be allocated and fit on small GPUs
+# It also helps faster parallel loads of multiple shards
 MISTRAL_SHARDER_REPO = "filipealmeida/Mistral-7B-Instruct-v0.1-sharded"
 LOCAL_MISTRAL_SHARDED = os.path.join(MODELS_DIR, "Mistral-7B-Instruct-v0.1-sharded")
 DEBUG = True
+LANGCHAIN_ENABLED = True
 
 # ─── DOWNLOAD IF MISSING ─────────────────────────────────────────────────────
 def ensure_snapshot(repo_id: str, local_path: str):
@@ -99,11 +103,8 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: List[ChatMessage]
-    temperature: float = 0.7
-    top_k: int = 50
-    top_p: float = 0.9
 
-# ─── SET UP CHAIN & MEMORY ────────────────────────────────────────────────────
+# ─── PROMPT & CHAIN FACTORY ────────────────────────────────────────────────────
 chat_prompt = PromptTemplate(
     input_variables=["history", "input"],
     template="""
@@ -112,7 +113,14 @@ You are a helpful assistant. Here is the conversation so far:
 User: {input}
 Assistant:"""
 )
-base_chain = LLMChain(llm=mistral_llm, prompt=chat_prompt)
+
+def get_conversation_chain(memory: ConversationBufferMemory) -> ConversationChain:
+    return ConversationChain(
+        llm=mistral_llm,
+        prompt=chat_prompt,
+        memory=memory,
+        verbose=DEBUG,
+    )
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request, response: Response):
@@ -123,10 +131,13 @@ async def read_root(request: Request, response: Response):
             key="session_id", value=session_id,
             httponly=True, samesite="lax"
         )
-    _memory_store.setdefault(
-        session_id,
-        ConversationBufferMemory(memory_key="history")
-    )
+    
+    if LANGCHAIN_ENABLED:
+        # if using LangChain, init session memory
+        _memory_store.setdefault(
+            session_id,
+            ConversationBufferMemory(memory_key="history")
+        )
     return templates.TemplateResponse("index.html", {"request": request})
 
 @app.post("/chat")
@@ -136,25 +147,39 @@ async def chat(req: ChatRequest, request: Request):
     if not session_id:
         session_id = str(uuid4())
         new_cookie = True
-    memory = _memory_store.setdefault(
-        session_id,
-        ConversationBufferMemory(memory_key="history")
-    )
-    # bind memory
-    conversation = base_chain.copy()
-    conversation.memory = memory
-    # get user message
+
+    # extract last user message
     user_msg = next(
         (m.content for m in reversed(req.messages) if m.role == "user"),
         ""
     )
+
     if DEBUG:
         print(f"[{session_id}] User: {user_msg}")
-    # predict
-    assistant_reply = conversation.predict(input=user_msg)
+
+    # decide whether to use LangChain or raw pipeline
+    if LANGCHAIN_ENABLED:
+        
+        # get/create memory, run with LangChain
+        memory = _memory_store.setdefault(
+            session_id,
+            ConversationBufferMemory(memory_key="history")
+        )
+        
+        # build chain bound to this session's memory
+        conversation = get_conversation_chain(memory)
+
+        # predict (memory is updated internally)
+        assistant_reply = conversation.predict(input=user_msg)
+    else:
+        # raw pipeline: no history, just predict from the latest prompt
+        outputs = text_gen_pipeline(user_msg)
+        assistant_reply = outputs[0]["generated_text"].strip()
+    
     if DEBUG:
         print(f"[{session_id}] Assistant: {assistant_reply}")
-    # send response
+
+    # prepare and send response
     response = JSONResponse({"role": "assistant", "content": assistant_reply})
     if new_cookie:
         response.set_cookie(
